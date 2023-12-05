@@ -14,9 +14,12 @@ runtime with backported features from 5.3.
 * Reading of WebAssembly's type, import, function, memory, export, code and data
   sections (and skipping others)
 * Initialization of one active data segment
-* Execution of enough instructions to run a hello world program
+* Execution of enough instructions to run a hello world program and an addition
+  program
   * Supports proper function stacks, with locals, arguments and returns
   * The stack is implemented very literally from the specification
+  * Prints to the console using a user-provided import function
+  * Exported functions can be called from Lua like an ordinary function
 
 ## Seeing it in action
 
