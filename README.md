@@ -30,6 +30,9 @@ rustc --target wasm32-unknown-unknown hello.rs
 rustc -C opt-level=3 --target wasm32-unknown-unknown hello.rs # Compile with optimizations
 ```
 
+Then, assuming you are in the same directory with the compiled `.wasm` module
+and this script, run the script, which explicitly looks for a `hello.wasm` file.
+
 ## Does this mean I can create optimized programs in another language and run them blazingly fast in Lua?
 
 lol no
