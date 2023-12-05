@@ -49,3 +49,19 @@ But hey, at least you can program in any language that compiles to WebAssembly.
 I think the novelty outweighs the cost — especially in the final target of
 Minecraft computers, where novelty is practically the driving force — many times
 over.
+
+## Vital improvements to do
+
+* Implement all [WASM 1.0
+  instructions](https://webassembly.github.io/spec/core/binary/instructions.html)
+* Separate module loading and instantiation
+  * Allow more than one data segment
+    * Read an expression without executing it (The [data
+        section](https://webassembly.github.io/spec/core/binary/modules.html#data-section)
+        follows the format
+        ```
+        [number of segments] (0 [expression evaluating to the memory offset] [number of bytes] [bytes])*n
+        ```
+        (simplified) and therefore the expression must be able to be skipped to read
+        the remaining segments, as otherwise the size of any segment's definition is
+        unknown)
