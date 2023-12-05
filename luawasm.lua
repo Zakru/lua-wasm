@@ -11,7 +11,7 @@ end
 local luawasm = {}
 
 function luawasm.instantiate(path, importFuncDefs)
-  local f = io.open("hello.wasm", "rb")
+  local f = io.open(path, "rb")
 
   local data, other = f:read("*all")
   f:close()
@@ -315,6 +315,11 @@ function luawasm.instantiate(path, importFuncDefs)
         local imm = c.readS32()
         debug("Push immediate i32 " .. imm)
         push(imm)
+      elseif nextInstr == 0x6A then
+        local b, a = pop(), pop()
+        local sum = bit32.band(a + b, 0xffffffff)
+        debug(string.format("Add i32 %d + %d = %d", a, b, sum))
+        push(sum)
       else
         error("Unknown instruction: " .. string.format("%02X", nextInstr))
       end
@@ -334,9 +339,9 @@ function luawasm.instantiate(path, importFuncDefs)
   local wrappedExports = {}
 
   for k,v in pairs(exportFuncs) do
-    local funci = exportFuncs["main"]
+    local funci = v
     local codei = funci - #importFuncs + 1
-    local ftype = funcTypes[funcsType[codei]]
+    local ftype = funcTypes[funcsType[codei]+1]
     wrappedExports[k] = function(...)
       return execute(createCursor(funcs[codei]), ftype.returns, ...)
     end
