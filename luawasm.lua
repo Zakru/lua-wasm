@@ -2,7 +2,7 @@ print("LuaWASM")
 
 -- LUAWASM_DEBUG_ON = true
 
-function debug(...)
+local function debug(...)
   if LUAWASM_DEBUG_ON then
     print(...)
   end
@@ -17,7 +17,7 @@ function luawasm.instantiate(path, importFuncDefs)
   f:close()
   print("Data length " .. string.len(data))
 
-  function createCursor(start)
+  local function createCursor(start)
     local cursor = start or 1
 
     local t = {}
@@ -106,7 +106,7 @@ function luawasm.instantiate(path, importFuncDefs)
   local exportFuncs = {}
   local datas = {}
 
-  function loadString(addr, len)
+  local function loadString(addr, len)
     local chars = {}
     for i=1,len do
       chars[i] = string.char(memInst[1][addr+i])
@@ -210,23 +210,23 @@ function luawasm.instantiate(path, importFuncDefs)
     end
   end
 
-  function execute(c, returns, ...)
+  local function execute(c, returns, ...)
     local stack = {}
     -- The spec defines that conceptually the last frame on the stack is the current frame,
     -- but we
     local currentFrame = setmetatable({ returns=returns, returnAddr=nil, locals={...} }, { frame = true })
 
-    function push(v)
+    local function push(v)
       stack[#stack + 1] = v
     end
 
-    function pop()
+    local function pop()
       local v = stack[#stack]
       stack[#stack] = nil
       return v
     end
 
-    function popn(n)
+    local function popn(n)
       local start = #stack - n
       local vs = {}
       for i=1,n do
@@ -236,25 +236,25 @@ function luawasm.instantiate(path, importFuncDefs)
       return vs
     end
 
-    function pushn(vs)
+    local function pushn(vs)
       local start = #stack
       for i,v in ipairs(vs) do
         stack[start+i] = v
       end
     end
 
-    function pushFrame(args, returns)
+    local function pushFrame(args, returns)
       local newFrame = setmetatable({ returns=returns, returnAddr=c.getCursor(), locals=popn(args) }, { frame = true })
       stack[#stack + 1] = currentFrame
       currentFrame = newFrame
     end
 
-    function popFrame()
+    local function popFrame()
       currentFrame = stack[#stack]
       stack[#stack] = nil
     end
 
-    function isFrame()
+    local function isFrame()
       if type(stack[#stack]) ~= "table" then return false end
       mt = getmetatable(stack[#stack])
       return mt ~= nil and mt.frame == true
@@ -349,6 +349,7 @@ function luawasm.instantiate(path, importFuncDefs)
 
   return {
     exports=wrappedExports,
+    loadString=loadString
   }
 end
 
