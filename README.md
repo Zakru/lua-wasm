@@ -50,7 +50,7 @@ I think the novelty outweighs the cost — especially in the final target of
 Minecraft computers, where novelty is practically the driving force — many times
 over.
 
-## Vital improvements to do
+## Future goals
 
 * Implement all [WASM 1.0
   instructions](https://webassembly.github.io/spec/core/binary/instructions.html)
@@ -65,3 +65,12 @@ over.
         (simplified) and therefore the expression must be able to be skipped to read
         the remaining segments, as otherwise the size of any segment's definition is
         unknown)
+* Create a separate project containing utilities for usage with CC: Tweaked,
+  including
+  * A program loader
+  * A shell capable of/patches to existing software to enable executing WASM
+    programs as commands
+  * A partial and/or extended implementation of
+    [WASI](https://github.com/WebAssembly/WASI/blob/main/Proposals.md)
+  * Note that the projects are intended to be separate such that the code of
+    this project contains no references to CC.
