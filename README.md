@@ -25,8 +25,8 @@ runtime with backported features from 5.3.
 
 This project currently targets a Lua runtime of version 5.3. To compile the
 hello world module, ensure that you have installed Rust and the
-`wasm32-unknown-unknown` target. Use one of the following commands to compile
-the module into a `.wasm` binary.
+`wasm32-unknown-unknown` target. Use one of the following commands to compile a
+module into a `.wasm` binary.
 
 ```sh
 rustc --target wasm32-unknown-unknown hello.rs
@@ -34,7 +34,7 @@ rustc -C opt-level=3 --target wasm32-unknown-unknown hello.rs # Compile with opt
 ```
 
 Then, assuming you are in the same directory with the compiled `.wasm` module
-and this script, run the script, which explicitly looks for a `hello.wasm` file.
+and the corresponding example Lua script, run the script.
 
 ## Does this mean I can create optimized programs in another language and run them blazingly fast in Lua?
 
