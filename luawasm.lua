@@ -51,6 +51,9 @@ function createCursor(start)
       off = off + 7
 
       if bit32.band(b, 0x80) == 0 then
+        if off > 32 then
+          off = 32
+        end
         return bit32.arshift(bit32.lshift(i, 32-off), 32-off)
       end
     end
