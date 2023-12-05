@@ -1,0 +1,6 @@
+# Built test modules
+*.wasm
+
+# Lua runtime
+*lua*.exe
+*lua*.dll
