@@ -1,6 +1,6 @@
 print("LuaWASM")
 
--- LUAWASM_DEBUG_ON = true
+LUAWASM_DEBUG_ON = true
 
 local EXTERN_FUNC   = 0x00
 local EXTERN_TABLE  = 0x01
@@ -78,6 +78,31 @@ local function createCursor(data, start)
     end
   end
 
+  function t.readS64()
+    local low = 0
+    local high = 0
+    local off = 0
+    while true do
+      local b = t.readByte()
+      low = bit32.bor(low, bit32.lshift(bit32.band(b, 0x7f), off))
+      high = bit32.bor(high, bit32.lshift(bit32.band(b, 0x7f), off-32))
+
+      off = off + 7
+
+      if bit32.band(b, 0x80) == 0 then
+        if off < 32 then
+          low = bit32.arshift(bit32.lshift(low, 32-off), 32-off)
+          if bit32.band(low, 0x80000000) ~= 0 then
+            high = 0xffffffff
+          end
+        elseif off < 64 then
+          high = bit32.arshift(bit32.lshift(high, 64-off), 64-off)
+        end
+        return low + 0x100000000 * high
+      end
+    end
+  end
+
   function t.readName()
     local len = t.readU32()
     local name = string.sub(data, cursor, cursor+len-1)
@@ -134,7 +159,7 @@ function moduleIndex:instantiate(importDefs)
   inst.funcs = {}
 
   for i,import in ipairs(self.imports or {}) do
-    if importDefs[import.modName] == nil or importDefs[import.modName][import.name] == nil then
+    if importDefs == nil or importDefs[import.modName] == nil or importDefs[import.modName][import.name] == nil then
       error("Import not defined: " .. import.modName .. "." .. import.name)
     end
     local importDef = importDefs[import.modName][import.name]
@@ -160,6 +185,11 @@ function moduleIndex:instantiate(importDefs)
       memoryInst[i] = 0
     end
     inst.memories[m] = memoryInst
+  end
+
+  inst.globals = {}
+  for g,glob in ipairs(self.globals or {}) do
+    table.insert(inst.globals, inst:evaluate(glob.init, 1, 0))
   end
 
   for d,data in ipairs(self.datas or {}) do
@@ -258,44 +288,104 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
     return mt ~= nil and mt.frame == true
   end
 
-  for i,instr in ipairs(instrSeq) do
-    local opcode = instr[1]
+  local function doInstrSeq(instrSeq)
+    for i,instr in ipairs(instrSeq) do
+      local opcode = instr[1]
 
-    if opcode == 0x0F then
-      debug("Return")
-      local returns = popn(returns)
-      return table.unpack(returns)
-    elseif opcode == 0x10 then
-      debug("Call function " .. instr[2])
-      local func = self.funcs[instr[2] + 1]
-      local args = popn(#func.funcType.args)
+      if opcode == 0x02 then
+        debug("Block")
+        if doInstrSeq(instr[3]) then
+          return true
+        end
+      elseif opcode == 0x0D then
+        debug("Branch " .. instr[2])
+        return true
+      elseif opcode == 0x0F then
+        debug("Return")
+        return true
+      elseif opcode == 0x10 then
+        debug("Call function " .. instr[2])
+        local func = self.funcs[instr[2] + 1]
+        local args = popn(#func.funcType.args)
 
-      if func.funcKind == "host" then
-        pushn({func.code(table.unpack(args))})
-      elseif exportDef.funcKind == "inst" then
-        pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
+        if func.funcKind == "host" then
+          pushn({func.code(table.unpack(args))})
+        elseif exportDef.funcKind == "inst" then
+          pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
+        end
+      elseif opcode == 0x1A then
+        debug("Drop")
+        pop()
+      elseif opcode == 0x20 then
+        debug("Push from local " .. instr[2])
+        push(locals[instr[2]+1])
+      elseif opcode == 0x21 then
+        debug("Pop to local " .. instr[2])
+        locals[instr[2]+1] = pop()
+      elseif opcode == 0x22 then
+        debug("Copy to local " .. instr[2])
+        locals[instr[2]+1] = stack[#stack]
+      elseif opcode == 0x23 then
+        debug("Push from global " .. instr[2])
+        push(self.globals[instr[2]+1])
+      elseif opcode == 0x24 then
+        debug("Pop to global " .. instr[2])
+        self.globals[instr[2]+1] = pop()
+      elseif opcode == 0x37 then
+        debug(string.format("Store i64 (align %d offset %08X)", 2^instr[2], instr[3]))
+        local v = pop()
+        local i = pop()
+        local addr = instr[3] + i
+        if addr + 8 > #self.memories[1] then
+          error(string.format("Memory address out of bounds (size %08X, address was %08X)", #self.memories[i], addr))
+        end
+        for i=1,4 do
+          self.memories[addr+i] = bit32.band(bit32.rshift(v, (i-1)*8), 0xff)
+        end
+        local high = math.floor((v - bit32.band(v, 0xffffffff)) / 0x100000000)
+        for i=1,4 do
+          self.memories[addr+4+i] = bit32.band(bit32.rshift(high, (i-1)*8), 0xff)
+        end
+      elseif opcode == 0x41 then
+        debug("Push immediate i32 " .. instr[2])
+        push(instr[2])
+      elseif opcode == 0x42 then
+        debug("Push immediate i64 " .. instr[2])
+        push(instr[2])
+      elseif opcode == 0x4B then
+        io.write("Compare u32 ")
+        local b, a = pop(), pop()
+        local res
+        if a > b then
+          res = 1
+        else
+          res = 0
+        end
+        debug(string.format("%d > %d = %d", a, b, res))
+        push(res)
+      elseif opcode == 0x6A then
+        io.write("Add i32 ")
+        local b, a = pop(), pop()
+        local sum = bit32.band(a + b, 0xffffffff)
+        debug(string.format("%d + %d = %d", a, b, sum))
+        push(sum)
+      elseif opcode == 0x6B then
+        io.write("Subtract i32 ")
+        local b, a = pop(), pop()
+        local diff = bit32.band(a - b, 0xffffffff)
+        debug(string.format("%d - %d = %d", a, b, diff))
+        push(diff)
+      else
+        error("Unimplemented instruction: " .. string.format("%02X", opcode))
       end
-    elseif opcode == 0x1A then
-      debug("Drop")
-      pop()
-    elseif opcode == 0x20 then
-      debug("Push from local " .. instr[2])
-      push(locals[instr[2]+1])
-    elseif opcode == 0x21 then
-      debug("Pop to local " .. instr[2])
-      locals[instr[2]+1] = pop()
-    elseif opcode == 0x41 then
-      debug("Push immediate i32 " .. instr[2])
-      push(instr[2])
-    elseif opcode == 0x6A then
-      local b, a = pop(), pop()
-      local sum = bit32.band(a + b, 0xffffffff)
-      debug(string.format("Add i32 %d + %d = %d", a, b, sum))
-      push(sum)
-    else
-      error("Unimplemented instruction: " .. string.format("%02X", opcode))
     end
+
+    debug("Implicit return")
+
+    return false
   end
+
+  doInstrSeq(instrSeq)
 
   local returns = popn(returns)
   return table.unpack(returns)
@@ -336,7 +426,7 @@ function luawasm.load(path)
 
   local function readTableType()
     local refType = c.readByte()
-    local limits = c.readLimits()
+    local limits = readLimits()
     return { refType=refType, limits=limits }
   end
 
@@ -360,6 +450,10 @@ function luawasm.load(path)
     end
   end
 
+  local function readMemArg()
+    return c.readU32(), c.readU32()
+  end
+
   local function readInstrSeq()
     local instr = {}
     while true do
@@ -367,10 +461,7 @@ function luawasm.load(path)
 
       if opcode == 0x0B or opcode == 0x05 then
         return instr, opcode
-      elseif opcode == 0x00 then
-        table.insert(instr, { 0x00 })
-        return instr, 0x00
-      elseif opcode == 0x01 or opcode == 0x0F or opcode == 0xD1 or opcode == 0x1A or opcode == 0x1B or opcode >= 0x45 and opcode <= 0xC4 then
+      elseif opcode == 0x00 or opcode == 0x01 or opcode == 0x0F or opcode == 0xD1 or opcode == 0x1A or opcode == 0x1B or opcode >= 0x45 and opcode <= 0xC4 then
         table.insert(instr, { opcode })
       elseif opcode == 0x02 or opcode == 0x03 then
         local blockType = readBlockType()
@@ -407,8 +498,14 @@ function luawasm.load(path)
         end
         local defaultLabel = c.readU32()
         table.insert(instr, { opcode, labels, defaultLabel })
+      elseif opcode == 0x11 then
+        table.insert(instr, { 0x11, c.readU32(), c.readU32() })
+      elseif opcode >= 0x28 and opcode <= 0x3E then
+        table.insert(instr, { opcode, readMemArg() })
       elseif opcode == 0x41 then
         table.insert(instr, { 0x41, c.readS32() })
+      elseif opcode == 0x42 then
+        table.insert(instr, { 0x42, c.readS64() })
       else
         error(string.format("Unimplemented opcode: 0x%02X", opcode))
       end
@@ -428,7 +525,7 @@ function luawasm.load(path)
   while c.getCursor() <= string.len(data) do
     local sectionId = c.readByte()
     local sectionSize = c.readU32()
-    local nextSection = c.getCursor() + sectionSize - 1
+    local nextSection = c.getCursor() + sectionSize
 
     if sectionId == 0 then
       local customName = c.readName()
