@@ -1,7 +1,5 @@
 print("LuaWASM")
 
-LUAWASM_DEBUG_ON = true
-
 local EXTERN_FUNC   = 0x00
 local EXTERN_TABLE  = 0x01
 local EXTERN_MEM    = 0x02
@@ -18,6 +16,12 @@ local VALTYPE_F64 = 0x7C
 local VECTYPE_V128 = 0x7B
 
 local ELEM_KIND_FUNC = 0x00
+
+local function debugn(...)
+  if LUAWASM_DEBUG_ON then
+    io.write(...)
+  end
+end
 
 local function debug(...)
   if LUAWASM_DEBUG_ON then
@@ -353,7 +357,7 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
         debug("Push immediate i64 " .. instr[2])
         push(instr[2])
       elseif opcode == 0x4B then
-        io.write("Compare u32 ")
+        debugn("Compare u32 ")
         local b, a = pop(), pop()
         local res
         if a > b then
@@ -364,13 +368,13 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
         debug(string.format("%d > %d = %d", a, b, res))
         push(res)
       elseif opcode == 0x6A then
-        io.write("Add i32 ")
+        debugn("Add i32 ")
         local b, a = pop(), pop()
         local sum = bit32.band(a + b, 0xffffffff)
         debug(string.format("%d + %d = %d", a, b, sum))
         push(sum)
       elseif opcode == 0x6B then
-        io.write("Subtract i32 ")
+        debugn("Subtract i32 ")
         local b, a = pop(), pop()
         local diff = bit32.band(a - b, 0xffffffff)
         debug(string.format("%d - %d = %d", a, b, diff))
