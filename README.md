@@ -63,3 +63,22 @@ over.
     [WASI](https://github.com/WebAssembly/WASI/blob/main/Proposals.md)
   * Note that the projects are intended to be separate such that the code of
     this project contains no references to CC.
+* Look into compiling WebAssembly into Lua code. Static solutions such as
+  [wasm2lua](https://github.com/SwadicalRag/wasm2lua) exist.
+  * Pros of a static approach over luawasm
+    * No runtime required. Compilation of the Lua code is done at build time and
+      therefore the end user can run the code seamlessly.
+    * End user doesn't need to be aware of the extra steps
+  * Cons of a static approach ("Cope with sunken cost fallacy after finding
+    wasm2lua")
+    * (wasm2lua-specific) Documentation is lacking (Target Lua version unclear,
+      how imports are used). Requires Node.js.
+    * Takes another build step
+    * Does not fit the use case where a user wants to run arbitrary WebAssembly
+      from Lua
+    * Sandboxing is more difficult
+  * Whereas luawasm requires the end user to have the runtime, wasm2lua moves
+    this burden to the developer's side, although this assumption breaks if the
+    user wants to integrate other pre-existing WebAssembly to the program.
+  * Whether dynamic or static, compilation to Lua would undeniably speed up
+    execution.
