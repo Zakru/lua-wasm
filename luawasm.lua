@@ -2,355 +2,666 @@ print("LuaWASM")
 
 -- LUAWASM_DEBUG_ON = true
 
+local EXTERN_FUNC   = 0x00
+local EXTERN_TABLE  = 0x01
+local EXTERN_MEM    = 0x02
+local EXTERN_GLOBAL = 0x03
+
+local REFTYPE_FUNC   = 0x70
+local REFTYPE_EXTERN = 0x6F
+
+local VALTYPE_I32 = 0x7F
+local VALTYPE_I64 = 0x7E
+local VALTYPE_F32 = 0x7D
+local VALTYPE_F64 = 0x7C
+
+local VECTYPE_V128 = 0x7B
+
+local ELEM_KIND_FUNC = 0x00
+
 local function debug(...)
   if LUAWASM_DEBUG_ON then
     print(...)
   end
 end
 
-local luawasm = {}
+local function createCursor(data, start)
+  local cursor = start or 1
 
-function luawasm.instantiate(path, importFuncDefs)
-  local f = io.open(path, "rb")
+  local t = {}
 
-  local data, other = f:read("*all")
-  f:close()
-  print("Data length " .. string.len(data))
-
-  local function createCursor(start)
-    local cursor = start or 1
-
-    local t = {}
-
-    function t.readByte()
-      local b = string.byte(data, cursor)
-      if b == nil then
-        error("Expected another byte at " .. cursor .. ", length " .. string.len(data))
-      end
-      cursor = cursor + 1
-      return b
+  function t.readByte()
+    local b = string.byte(data, cursor)
+    if b == nil then
+      error("Expected another byte at " .. cursor .. ", length " .. string.len(data))
     end
-
-    function t.readU32()
-      local i = 0
-      local off = 0
-      while true do
-        local b = t.readByte()
-        i = bit32.bor(i, bit32.lshift(bit32.band(b, 0x7f), off))
-
-        if bit32.band(b, 0x80) == 0 then return i end
-
-        off = off + 7
-      end
-    end
-
-    function t.readS32()
-      local i = 0
-      local off = 0
-      while true do
-        local b = t.readByte()
-        i = bit32.bor(i, bit32.lshift(bit32.band(b, 0x7f), off))
-
-        off = off + 7
-
-        if bit32.band(b, 0x80) == 0 then
-          if off > 32 then
-            off = 32
-          end
-          return bit32.arshift(bit32.lshift(i, 32-off), 32-off)
-        end
-      end
-    end
-
-    function t.readName()
-      local len = t.readU32()
-      local name = string.sub(data, cursor, cursor+len-1)
-      t.skipBytes(len)
-      return name
-    end
-
-    function t.skipBytes(n)
-      cursor = cursor + n
-    end
-
-    function t.expect(expected)
-      local len = string.len(expected)
-      local actual = string.sub(data, cursor, cursor+len-1)
-      if actual ~= expected then
-        error("Got unexpected data: " .. actual)
-      end
-      t.skipBytes(len)
-    end
-
-    function t.getCursor()
-      return cursor
-    end
-
-    function t.setCursor(c)
-      cursor = c
-    end
-
-    return t
+    cursor = cursor + 1
+    return b
   end
 
-  local c = createCursor()
+  function t.peekByte()
+    local b = string.byte(data, cursor)
+    if b == nil then
+      error("Expected another byte at " .. cursor .. ", length " .. string.len(data))
+    end
+    return b
+  end
+
+  function t.readU32()
+    local i = 0
+    local off = 0
+    while true do
+      local b = t.readByte()
+      i = bit32.bor(i, bit32.lshift(bit32.band(b, 0x7f), off))
+
+      if bit32.band(b, 0x80) == 0 then return i end
+
+      off = off + 7
+    end
+  end
+
+  function t.readS32()
+    local i = 0
+    local off = 0
+    while true do
+      local b = t.readByte()
+      i = bit32.bor(i, bit32.lshift(bit32.band(b, 0x7f), off))
+
+      off = off + 7
+
+      if bit32.band(b, 0x80) == 0 then
+        if off > 32 then
+          off = 32
+        end
+        return bit32.arshift(bit32.lshift(i, 32-off), 32-off)
+      end
+    end
+  end
+
+  function t.readName()
+    local len = t.readU32()
+    local name = string.sub(data, cursor, cursor+len-1)
+    t.skipBytes(len)
+    return name
+  end
+
+  function t.skipBytes(n)
+    cursor = cursor + n
+  end
+
+  function t.expect(expected)
+    local len = string.len(expected)
+    local actual = string.sub(data, cursor, cursor+len-1)
+    if actual ~= expected then
+      error("Got unexpected data: " .. actual)
+    end
+    t.skipBytes(len)
+  end
+
+  function t.getCursor()
+    return cursor
+  end
+
+  function t.setCursor(c)
+    cursor = c
+  end
+
+  return t
+end
+
+local moduleIndex = {}
+local moduleMt = { __index=moduleIndex }
+
+function moduleIndex:debugDump()
+  for i,export in ipairs(self.exports) do
+    if export.exportType == EXTERN_FUNC then
+      print(export.name)
+      for i1,instr in ipairs(self.funcs[1].expr) do
+        print(table.unpack(instr))
+      end
+    end
+  end
+end
+
+local instanceIndex = {}
+local instanceMt = { __index=instanceIndex }
+
+function moduleIndex:instantiate(importDefs)
+  local inst = setmetatable({}, instanceMt)
+
+  inst.module = self
+
+  inst.funcs = {}
+
+  for i,import in ipairs(self.imports or {}) do
+    if importDefs[import.modName] == nil or importDefs[import.modName][import.name] == nil then
+      error("Import not defined: " .. import.modName .. "." .. import.name)
+    end
+    local importDef = importDefs[import.modName][import.name]
+
+    if import.importType == EXTERN_FUNC then
+      if type(importDef) ~= "function" then
+        error(string.format("Import for `%s.%s` is of incorrect type (got %s, expected function)", import.modName, import.name, type(importDef)))
+      end
+      table.insert(inst.funcs, { funcType=self.types[import.desc+1], funcKind="host", code=importDef })
+    else
+      error("Unimplemented import: " .. import.importType)
+    end
+  end
+
+  for f,func in ipairs(self.funcs) do
+    table.insert(inst.funcs, { funcType=self.types[func.funcType+1], funcKind="inst", code=func })
+  end
+
+  inst.memories = {}
+  for m,memory in ipairs(self.memories) do
+    local memoryInst = {}
+    for i=1,memory.min*0x10000 do
+      memoryInst[i] = 0
+    end
+    inst.memories[m] = memoryInst
+  end
+
+  for d,data in ipairs(self.datas or {}) do
+    if data.mode == "active" then
+      local offset = inst:evaluate(data.activeInit.offset, 1, 0)
+      local memInst = inst.memories[data.activeInit.memIndex+1]
+      for i=1,string.len(data.init) do
+        memInst[offset+i] = string.byte(data.init, i)
+      end
+    end
+  end
+
+  inst.exports = {}
+  for i,export in ipairs(self.exports) do
+    if export.exportType == EXTERN_FUNC then
+      local exportDef = inst.funcs[export.index+1]
+      if exportDef.funcKind == "host" then
+        inst.exports[export.name] = exportDef.code
+      elseif exportDef.funcKind == "inst" then
+        inst.exports[export.name] = function(...)
+          return inst:evaluate(exportDef.code.expr, #exportDef.funcType.returns, #exportDef.funcType.args, ...)
+        end
+      end
+    else
+      print("Unimplemented export: " .. export.exportType)
+    end
+  end
+
+  return inst
+end
+
+function instanceIndex:loadString(addr, len)
+  local chars = {}
+  for i=1,len do
+    chars[i] = string.char(self.memories[1][addr+i])
+  end
+  return table.concat(chars)
+end
+
+function instanceIndex:evaluate(instrSeq, returns, args, ...)
+  local argsList = {...}
+  local locals = {}
+  for i=1,args do
+    locals[i] = argsList[i]
+  end
+
+  local stack = {}
+
+  local function push(v)
+    stack[#stack + 1] = v
+  end
+
+  local function pop()
+    if #stack == 0 then
+      error("Stack underflow")
+    end
+    local v = stack[#stack]
+    stack[#stack] = nil
+    return v
+  end
+
+  local function popn(n)
+    if #stack < n then
+      error("Stack underflow")
+    end
+    local start = #stack - n
+    local vs = {}
+    for i=1,n do
+      vs[i] = stack[start+i]
+      stack[start+i] = nil
+    end
+    return vs
+  end
+
+  local function pushn(vs)
+    local start = #stack
+    for i,v in ipairs(vs) do
+      stack[start+i] = v
+    end
+  end
+
+  local function pushFrame(args, returns)
+    local newFrame = setmetatable({ returns=returns, returnAddr=c.getCursor(), locals=popn(args) }, { frame = true })
+    stack[#stack + 1] = currentFrame
+    currentFrame = newFrame
+  end
+
+  local function popFrame()
+    currentFrame = stack[#stack]
+    stack[#stack] = nil
+  end
+
+  local function isFrame()
+    if type(stack[#stack]) ~= "table" then return false end
+    mt = getmetatable(stack[#stack])
+    return mt ~= nil and mt.frame == true
+  end
+
+  for i,instr in ipairs(instrSeq) do
+    local opcode = instr[1]
+
+    if opcode == 0x0F then
+      debug("Return")
+      local returns = popn(returns)
+      return table.unpack(returns)
+    elseif opcode == 0x10 then
+      debug("Call function " .. instr[2])
+      local func = self.funcs[instr[2] + 1]
+      local args = popn(#func.funcType.args)
+
+      if func.funcKind == "host" then
+        pushn({func.code(table.unpack(args))})
+      elseif exportDef.funcKind == "inst" then
+        pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
+      end
+    elseif opcode == 0x1A then
+      debug("Drop")
+      pop()
+    elseif opcode == 0x20 then
+      debug("Push from local " .. instr[2])
+      push(locals[instr[2]+1])
+    elseif opcode == 0x21 then
+      debug("Pop to local " .. instr[2])
+      locals[instr[2]+1] = pop()
+    elseif opcode == 0x41 then
+      debug("Push immediate i32 " .. instr[2])
+      push(instr[2])
+    elseif opcode == 0x6A then
+      local b, a = pop(), pop()
+      local sum = bit32.band(a + b, 0xffffffff)
+      debug(string.format("Add i32 %d + %d = %d", a, b, sum))
+      push(sum)
+    else
+      error("Unimplemented instruction: " .. string.format("%02X", opcode))
+    end
+  end
+
+  local returns = popn(returns)
+  return table.unpack(returns)
+end
+
+local luawasm = {}
+
+function luawasm.load(path)
+  local f = io.open(path, "rb")
+  local data = f:read("*all")
+  f:close()
+
+  local c = createCursor(data)
 
   c.expect("\0asm\1\0\0\0")
 
-  local memories = {}
-  local memInst = {}
-  local funcTypes = {}
-  local importFuncs = {}
-  local funcs = {}
-  local funcsType = {}
-  local exportFuncs = {}
-  local datas = {}
+  local mod = {}
+  mod.custom = {}
 
-  local function loadString(addr, len)
-    local chars = {}
-    for i=1,len do
-      chars[i] = string.char(memInst[1][addr+i])
+  local function createSection(name, init)
+    if mod[name] ~= nil then
+      error("Duplicate definition for section " .. name)
     end
-    return table.concat(chars)
+
+    mod[name] = init
+    return init
   end
+
+  local function readLimits()
+    local hasMax = c.readByte()
+    local min = c.readU32()
+    local max = nil
+    if hasMax ~= 0 then
+      max = c.readU32()
+    end
+    return { min=min, max=max }
+  end
+
+  local function readTableType()
+    local refType = c.readByte()
+    local limits = c.readLimits()
+    return { refType=refType, limits=limits }
+  end
+
+  local function readGlobalType()
+    local valType = c.readByte()
+    local mut = c.readByte() ~= 0
+    return { valType=valType, mut=mut }
+  end
+
+  local function readBlockType()
+    local typeByte = c.peekByte()
+    if bit32.band(typeByte, 0x80) ~= 0 then
+      return { typeKind="func", funcType=c.readU32() }
+    else
+      local valType = c.readByte()
+      if valType == 0x40 then
+        return { typeKind="empty" }
+      else
+        return { typeKind="inline", valType=valType }
+      end
+    end
+  end
+
+  local function readInstrSeq()
+    local instr = {}
+    while true do
+      local opcode = c.readByte()
+
+      if opcode == 0x0B or opcode == 0x05 then
+        return instr, opcode
+      elseif opcode == 0x00 then
+        table.insert(instr, { 0x00 })
+        return instr, 0x00
+      elseif opcode == 0x01 or opcode == 0x0F or opcode == 0xD1 or opcode == 0x1A or opcode == 0x1B or opcode >= 0x45 and opcode <= 0xC4 then
+        table.insert(instr, { opcode })
+      elseif opcode == 0x02 or opcode == 0x03 then
+        local blockType = readBlockType()
+
+        local block, stop = readInstrSeq()
+        if stop ~= 0x0B then
+          error(string.format("Block did not end in 0x0B. Instead, it ended in 0x%02X", stop))
+        end
+
+        table.insert(instr, { opcode, blockType, block })
+      elseif opcode == 0x04 then
+        local blockType = readBlockType()
+
+        local ifBlock, stop = readInstrSeq()
+        local elseBlock
+        if stop == 0x05 then
+          local stop
+          elseBlock, stop = readInstrSeq()
+          if stop ~= 0x0B then
+            error(string.format("Else block did not end in 0x0B. Instead, it ended in 0x%02X", stop))
+          end
+        elseif stop ~= 0x0B then
+          error(string.format("If block did not end in 0x0B or 0x05. Instead, it ended in 0x%02X", stop))
+        end
+
+        table.insert(instr, { 0x04, blockType, ifBlock, elseBlock })
+      elseif opcode == 0x0C or opcode == 0x0D or opcode == 0x10 or opcode == 0xD2 or opcode >= 0x20 and opcode <= 0x26 then
+        table.insert(instr, { opcode, c.readU32() })
+      elseif opcode == 0x0E then
+        local labelCount = c.readU32()
+        local labels = {}
+        for i=1,labelCount do
+          labels[i] = c.readU32()
+        end
+        local defaultLabel = c.readU32()
+        table.insert(instr, { opcode, labels, defaultLabel })
+      elseif opcode == 0x41 then
+        table.insert(instr, { 0x41, c.readS32() })
+      else
+        error(string.format("Unimplemented opcode: 0x%02X", opcode))
+      end
+    end
+  end
+
+  local function readExpr()
+    local instr, stop = readInstrSeq()
+    if stop ~= 0x0B then
+      error(string.format("Expression did not end in 0x0B. Instead, it ended in 0x%02X", stop))
+    end
+    return instr
+  end
+
+  -- Read all sections
 
   while c.getCursor() <= string.len(data) do
-    local secType = c.readByte()
-    print("Section type " .. secType)
-    local l = c.readU32()
-    print("Section length " .. l)
+    local sectionId = c.readByte()
+    local sectionSize = c.readU32()
+    local nextSection = c.getCursor() + sectionSize - 1
 
-    if secType == 1 then
-      for typei=1,c.readU32() do
+    if sectionId == 0 then
+      local customName = c.readName()
+      local customData = string.sub(data, c.getCursor(), nextSection - 1)
+      table.insert(mod.custom, { name=customName, data=customData })
+      c.setCursor(nextSection)
+    elseif sectionId == 1 then
+      local types = createSection("types", {})
+      local typeCount = c.readU32()
+      for i=1,typeCount do
         c.expect("\x60")
-        local argc = c.readU32()
-        c.skipBytes(argc)
-        local retc = c.readU32()
-        c.skipBytes(retc)
-        table.insert(funcTypes, { args=argc, returns=retc })
+        local funcType = {
+          args = {},
+          returns = {},
+        }
+
+        local argCount = c.readU32()
+        for j=1,argCount do
+          funcType.args[j] = c.readByte()
+        end
+        local retCount = c.readU32()
+        for j=1,retCount do
+          funcType.returns[j] = c.readByte()
+        end
+
+        types[i] = funcType
       end
-    elseif secType == 2 then
-      for importi=1,c.readU32() do
-        local mod = c.readName()
+    elseif sectionId == 2 then
+      local imports = createSection("imports", {})
+      local importCount = c.readU32()
+      for i=1,importCount do
+        local modName = c.readName()
         local name = c.readName()
-        local imtype = c.readByte()
-        local imidx = c.readU32()
-        print("import", name, imtype, imidx)
-        if imtype == 0 then
-          table.insert(importFuncs, { mod=mod, name=name, funcType=imidx })
+        local importType = c.readByte()
+        local importDesc = nil
+        if importType == EXTERN_FUNC then
+          -- Function
+          importDesc = c.readU32()
+        elseif importType == EXTERN_TABLE then
+          -- Table
+          importDesc = readTableType()
+        elseif importType == EXTERN_MEM then
+          -- Memory
+          importDesc = readLimits()
+        elseif importType == EXTERN_GLOBAL then
+          -- Global
+          importDesc = readGlobalType()
         end
+        imports[i] = {
+          modName = modName,
+          name = name,
+          importType = importType,
+          desc = importDesc,
+        }
       end
-    elseif secType == 3 then
-      for funci=1,c.readU32() do
-        local typei = c.readU32()
-        table.insert(funcsType, typei)
+    elseif sectionId == 3 then
+      local funcs = createSection("funcs", {})
+      local funcCount = c.readU32()
+      for i=1,funcCount do
+        funcs[i] = c.readU32()
       end
-    elseif secType == 5 then
-      for memi=1,c.readU32() do
-        local hasmax = c.readByte()
-        local min = c.readU32()
-        local max = nil
-        if hasmax ~= 0 then
-          max = c.readU32()
-        end
-        table.insert(memories, { min=min, max=max })
-        local init = {}
-        for i=1,min*0x10000 do
-          init[i] = 0
-        end
-        table.insert(memInst, init)
-        print("Mem " .. memi - 1, min, max)
+    elseif sectionId == 4 then
+      local tables = createSection("tables", {})
+      local tableCount = c.readU32()
+      for i=1,tableCount do
+        tables[i] = readTableType()
       end
-    elseif secType == 7 then
-      for exporti=1,c.readU32() do
+    elseif sectionId == 5 then
+      local memories = createSection("memories", {})
+      local memoryCount = c.readU32()
+      for i=1,memoryCount do
+        memories[i] = readLimits()
+      end
+    elseif sectionId == 6 then
+      local globals = createSection("globals", {})
+      local globalCount = c.readU32()
+      for i=1,globalCount do
+        local globalType = readGlobalType()
+        local init = readExpr()
+        globals[i] = { globalType=globalType, init=init }
+      end
+    elseif sectionId == 7 then
+      local exports = createSection("exports", {})
+      local exportCount = c.readU32()
+      for i=1,exportCount do
         local name = c.readName()
-        local extype = c.readByte()
-        local exidx = c.readU32()
-        print("export", name, extype, exidx)
-        if extype == 0 then
-          exportFuncs[name] = exidx
-        end
+        local exportType = c.readByte()
+        local exportIndex = c.readU32()
+        exports[i] = {
+          name = name,
+          exportType = exportType,
+          index = exportIndex,
+        }
       end
-    elseif secType == 10 then
-      -- Code section
+    elseif sectionId == 8 then
+      createSection("start", c.readU32())
+    elseif sectionId == 9 then
+      local elements = createSection("elements", {})
+      local elementCount = c.readU32()
+      for i=1,elementCount do
+        local elemBits = c.readU32()
+
+        local mode, activeInit
+        if bit32.band(elemBits, 0x1) == 0 then
+          mode = "active"
+
+          activeInit = { tableIndex=0 }
+          if bit32.band(elemBits, 0x2) ~= 0 then
+            activeInit.tableIndex = c.readU32()
+          end
+
+          activeInit.offset = readExpr()
+        else
+          if bit32.band(elemBits, 0x2) == 0 then
+            mode = "passive"
+          else
+            mode = "declarative"
+          end
+        end
+
+        -- Segment initializer
+        local elemType, initType, init
+        if bit32.band(elemBits, 0x4) == 0 then
+          initType = "index"
+
+          if bit32.band(elemBits, 0x3) == 0 then
+            elemKind = ELEM_KIND_FUNC
+          else
+            elemKind = c.readByte()
+          end
+
+          init = {}
+          local indexCount = c.readU32()
+          for j=1,indexCount do
+            init[j] = c.readU32()
+          end
+        else
+          initType = "expr"
+
+          if bit32.band(elemBits, 0x3) == 0 then
+            elemKind = REFTYPE_FUNC
+          else
+            elemKind = c.readByte()
+          end
+
+          init = {}
+          local exprCount = c.readU32()
+          for j=1,exprCount do
+            init[j] = readExpr()
+          end
+        end
+
+        elements[i] = {
+          mode=mode,
+          activeInit=activeInit,
+          elemKind=ELEM_KIND_FUNC,
+          initType=initType,
+          init=init,
+        }
+      end
+    elseif sectionId == 10 then
+      local codes = createSection("codes", {})
       local codeCount = c.readU32()
-      for codei=1,codeCount do
-        local codeLen = c.readU32()
-        local codeEnd = c.getCursor() + codeLen
-        print(codeEnd)
-
-        -- Skip locals
-        local localsCount = c.readU32()
-        for localsi=1,localsCount do
-          c.readU32() -- number of repeats
-          c.readByte() -- valtype
+      for i=1,codeCount do
+        local size = c.readU32()
+        local locals = {}
+        local localCount = c.readU32()
+        for j=1,localCount do
+          locals[j] = { count=c.readU32(), valType=c.readByte() }
         end
-
-        -- Record start of function code
-        table.insert(funcs, c.getCursor())
-
-        c.setCursor(codeEnd)
+        local expr = readExpr()
+        codes[i] = { locals=locals, expr=expr }
       end
-    elseif secType == 11 then
-      local dataEnd = c.getCursor() + l
-      -- Data section
+    elseif sectionId == 11 then
+      local datas = createSection("datas", {})
       local dataCount = c.readU32()
-      for datai=1,dataCount do
-        local bits = c.readU32()
-        if bits == 0 then
-          table.insert(datas, c.getCursor())
+      for i=1,dataCount do
+        local dataBits = c.readU32()
+
+        local mode, activeInit
+        if bit32.band(dataBits, 0x1) == 0 then
+          mode = "active"
+          activeInit = { memIndex=0 }
+
+          if bit32.band(dataBits, 0x2) ~= 0 then
+            activeInit.memIndex = c.readU32()
+          end
+
+          activeInit.offset = readExpr()
         else
-          error("Non-active-zero-page data segments unsupported")
+          mode = "passive"
         end
+
+        local byteCount = c.readU32()
+        local init = string.sub(data, c.getCursor(), c.getCursor()+byteCount-1)
+        c.setCursor(c.getCursor() + byteCount)
+
+        datas[i] = {
+          mode=mode,
+          activeInit=activeInit,
+          init=init,
+        }
       end
-      c.setCursor(dataEnd)
-    else
-      if secType ~= 0 then print("UNIMPLEMENTED") end
-      c.skipBytes(l)
+    elseif sectionId == 12 then
+      createSection("dataCount", c.readU32())
     end
   end
 
-  local function execute(c, returns, ...)
-    local stack = {}
-    -- The spec defines that conceptually the last frame on the stack is the current frame,
-    -- but we
-    local currentFrame = setmetatable({ returns=returns, returnAddr=nil, locals={...} }, { frame = true })
+  -- Done reading all sections. Post-process data.
 
-    local function push(v)
-      stack[#stack + 1] = v
-    end
-
-    local function pop()
-      local v = stack[#stack]
-      stack[#stack] = nil
-      return v
-    end
-
-    local function popn(n)
-      local start = #stack - n
-      local vs = {}
-      for i=1,n do
-        vs[i] = stack[start+i]
-        stack[start+i] = nil
-      end
-      return vs
-    end
-
-    local function pushn(vs)
-      local start = #stack
-      for i,v in ipairs(vs) do
-        stack[start+i] = v
-      end
-    end
-
-    local function pushFrame(args, returns)
-      local newFrame = setmetatable({ returns=returns, returnAddr=c.getCursor(), locals=popn(args) }, { frame = true })
-      stack[#stack + 1] = currentFrame
-      currentFrame = newFrame
-    end
-
-    local function popFrame()
-      currentFrame = stack[#stack]
-      stack[#stack] = nil
-    end
-
-    local function isFrame()
-      if type(stack[#stack]) ~= "table" then return false end
-      mt = getmetatable(stack[#stack])
-      return mt ~= nil and mt.frame == true
-    end
-
-    while true do
-      local nextInstr = c.readByte()
-
-      if nextInstr == 0x0B then
-        debug("Implicit return")
-        local returns = popn(currentFrame.returns)
-        if currentFrame.returnAddr == nil then
-          return table.unpack(returns)
-        end
-        c.setCursor(currentFrame.returnAddr)
-        popFrame()
-        pushn(returns)
-      elseif nextInstr == 0x0F then
-        debug("Return")
-        local returns = popn(currentFrame.returns)
-        if currentFrame.returnAddr == nil then
-          return table.unpack(returns)
-        end
-        c.setCursor(currentFrame.returnAddr)
-        while not isFrame() do
-          pop()
-        end
-        popFrame()
-        pushn(returns)
-      elseif nextInstr == 0x10 then
-        local imm = c.readU32()
-        debug("Call function " .. imm)
-        if imm < #importFuncs then
-          local func = importFuncs[imm + 1]
-          local ftype = funcTypes[func.funcType + 1]
-          debug(string.format("Imported function %s.%s (%d -> %d)", func.mod, func.name, ftype.args, ftype.returns))
-          importFuncDefs[func.mod][func.name](table.unpack(popn(ftype.args)))
-        else
-          local funci = imm - #importFuncs
-          local func = funcs[funci + 1]
-          local ftype = funcTypes[funcsType[funci + 1] + 1]
-          debug(string.format("%d -> %d", ftype.args, ftype.returns))
-          pushFrame(ftype.args, ftype.returns)
-          c.setCursor(func)
-        end
-      elseif nextInstr == 0x1A then
-        debug("Drop")
-        pop()
-      elseif nextInstr == 0x20 then
-        local imm = c.readU32()
-        debug("Push from local " .. imm)
-        push(currentFrame.locals[imm+1])
-      elseif nextInstr == 0x21 then
-        local imm = c.readU32()
-        debug("Pop to local " .. imm)
-        currentFrame.locals[imm+1] = pop()
-      elseif nextInstr == 0x41 then
-        local imm = c.readS32()
-        debug("Push immediate i32 " .. imm)
-        push(imm)
-      elseif nextInstr == 0x6A then
-        local b, a = pop(), pop()
-        local sum = bit32.band(a + b, 0xffffffff)
-        debug(string.format("Add i32 %d + %d = %d", a, b, sum))
-        push(sum)
-      else
-        error("Unknown instruction: " .. string.format("%02X", nextInstr))
-      end
-    end
+  if mod.dataCount ~= nil and mod.dataCount ~= #mod.datas then
+    error(string.format("Data count does not match (%d declared, %d defined)", mod.dataCount, #mod.datas))
   end
 
-  for di,data in ipairs(datas) do
-    local c = createCursor(data)
-    local offset = execute(c, 1)
-    local len = c.readU32()
-    local mem = memInst[0+1]
-    for i=1,len do
-      mem[offset+i] = c.readByte()
-    end
+  if #mod.funcs ~= #mod.codes then
+    error(string.format("Function and code counts do not match (%d functions, %d codes)", #mod.funcs, #mod.codes))
   end
 
-  local wrappedExports = {}
+  local funcs, codes = mod.funcs, mod.codes
+  mod.codes = nil
+  mod.funcs = {}
 
-  for k,v in pairs(exportFuncs) do
-    local funci = v
-    local codei = funci - #importFuncs + 1
-    local ftype = funcTypes[funcsType[codei]+1]
-    wrappedExports[k] = function(...)
-      return execute(createCursor(funcs[codei]), ftype.returns, ...)
-    end
+  for i=1,#funcs do
+    mod.funcs[i] = codes[i]
+    mod.funcs[i].funcType = funcs[i]
   end
 
-  return {
-    exports=wrappedExports,
-    loadString=loadString
-  }
+  return setmetatable(mod, moduleMt)
+end
+
+function luawasm.instantiate(path, importDefs)
+  local mod = luawasm.load(path)
+  return mod:instantiate(importDefs)
 end
 
 return luawasm

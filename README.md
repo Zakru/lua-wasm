@@ -13,12 +13,12 @@ runtime with backported features from 5.3.
 
 * Reading of WebAssembly's type, import, function, memory, export, code and data
   sections (and skipping others)
-* Initialization of one active data segment
+* Initialization of active data segments
 * Execution of enough instructions to run a hello world program and an addition
   program
   * Supports proper function stacks, with locals, arguments and returns
-  * The stack is implemented very literally from the specification
-  * Prints to the console using a user-provided import function
+  * The stack is implemented using recursive calls and block-specific stacks
+  * Can print to the console using a user-provided imported function
   * Exported functions can be called from Lua like an ordinary function
 
 ## Seeing it in action
@@ -54,17 +54,6 @@ over.
 
 * Implement all [WASM 1.0
   instructions](https://webassembly.github.io/spec/core/binary/instructions.html)
-* Separate module loading and instantiation
-  * Allow more than one data segment
-    * Read an expression without executing it (The [data
-        section](https://webassembly.github.io/spec/core/binary/modules.html#data-section)
-        follows the format
-        ```
-        [number of segments] (0 [expression evaluating to the memory offset] [number of bytes] [bytes])*n
-        ```
-        (simplified) and therefore the expression must be able to be skipped to read
-        the remaining segments, as otherwise the size of any segment's definition is
-        unknown)
 * Create a separate project containing utilities for usage with CC: Tweaked,
   including
   * A program loader

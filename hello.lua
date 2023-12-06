@@ -2,14 +2,14 @@ local luawasm = require "luawasm"
 
 local instance
 
-local importFuncDefs = {
+local importDefs = {
   env = {
     print = function(addr, len)
-      print(instance.loadString(addr, len))
+      print(instance:loadString(addr, len))
     end,
   },
 }
 
-instance = luawasm.instantiate("hello.wasm", importFuncDefs)
+instance = luawasm.instantiate("hello.wasm", importDefs)
 
 instance.exports.main()
