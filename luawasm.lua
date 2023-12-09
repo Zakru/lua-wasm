@@ -17,6 +17,8 @@ local VECTYPE_V128 = 0x7B
 
 local ELEM_KIND_FUNC = 0x00
 
+local REF_NULL = -1
+
 local debugIndent = 0
 local debugNewLine = true
 
@@ -206,6 +208,15 @@ function moduleIndex:instantiate(importDefs)
     inst.memories[m] = memoryInst
   end
 
+  inst.tables = {}
+  for t,table in ipairs(self.tables) do
+    local tableInst = {}
+    for i=1,table.limits.min do
+      tableInst[i] = REF_NULL
+    end
+    inst.tablles[t] = tableInst
+  end
+
   inst.globals = {}
   for g,glob in ipairs(self.globals or {}) do
     table.insert(inst.globals, inst:evaluate(glob.init, 1, 0))
@@ -366,13 +377,30 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
     end
   end
 
+  local function invokeFunction(funcIndex)
+    local func = self.funcs[funcIndex + 1]
+    local args = popn(#func.funcType.args)
+
+    if func.funcKind == "host" then
+      pushn({func.code(table.unpack(args))})
+    elseif func.funcKind == "inst" then
+      debugIndent = debugIndent + 1
+      pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
+      debugIndent = debugIndent - 1
+    end
+  end
+
   while true do
     while pos <= #seq do
       local instr = seq[pos]
       pos = pos + 1
       local opcode = instr[1]
 
-      if opcode == 0x02 then
+      if opcode == 0x00 then
+        error("Unreachable code reached")
+      elseif opcode == 0x01 then
+        debug("No-op")
+      elseif opcode == 0x02 then
         debugn("Block ")
         local argc, returnc = blockTypeArity(instr[2])
         debug(string.format("%d -> %d", argc, returnc))
@@ -382,6 +410,24 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
         local argc, returnc = blockTypeArity(instr[2])
         debug(string.format("%d -> %d", argc, returnc))
         doBlock(instr[3], argc, argc, pos - 1)
+      elseif opcode == 0x04 then
+        debugn("If ")
+        local argc, returnc = blockTypeArity(instr[2])
+        local v = pop()
+        debug(string.format("%d -> %d %d", argc, returnc, v))
+        if v ~= 0 then
+          doBlock(instr[3], argc, returnc)
+        end
+      elseif opcode == 0x05 then
+        debugn("If-else ")
+        local argc, returnc = blockTypeArity(instr[2])
+        local v = pop()
+        debug(string.format("%d -> %d %d", argc, returnc, v))
+        if v ~= 0 then
+          doBlock(instr[3], argc, returnc)
+        else
+          doBlock(instr[4], argc, returnc)
+        end
       elseif opcode == 0x0C then
         debug("Branch " .. instr[2])
         if gotoLabel(instr[2]) then
@@ -399,22 +445,42 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
             return table.unpack(returns)
           end
         end
+      elseif opcode == 0x0D then
+        debug("Branch from table (" .. table.concat(instr[2], ", ") .. ") default " .. instr[3])
+        local i = pop()
+        local labelIndex
+        if i >= #instr[2] then
+          debug("Branched to default with " .. i)
+          labelIndex = instr[3]
+        else
+          labelIndex = instr[2][i+1]
+          debug("Branched to " .. labelIndex .. " with " .. i)
+        end
+        if gotoLabel(labelIndex) then
+          -- Function label, return
+          local returns = popn(returns)
+          return table.unpack(returns)
+        end
       elseif opcode == 0x0F then
         debug("Return")
         local returns = popn(returns)
         return table.unpack(returns)
       elseif opcode == 0x10 then
         debug("Call function " .. instr[2])
-        local func = self.funcs[instr[2] + 1]
-        local args = popn(#func.funcType.args)
-
-        if func.funcKind == "host" then
-          pushn({func.code(table.unpack(args))})
-        elseif func.funcKind == "inst" then
-          debugIndent = debugIndent + 1
-          pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
-          debugIndent = debugIndent - 1
+        invokeFunction(instr[2])
+      elseif opcode == 0x11 then
+        local funcType = self.module.types[instr[2]+1]
+        debugn(string.format("Call indirect %d -> %d in %d: ", #funcType.args, #funcType.returns, instr[3]))
+        local i = pop()
+        local funcIndex = self.tables[instr[3]+1][i+1]
+        debug(funcIndex .. " @ " .. i)
+        if funcIndex == REF_NULL then
+          error("Function reference is null")
         end
+        if self.funcs[funcIndex+1].funcType ~= funcType then
+          error("Incorrect function type")
+        end
+        invokeFunction(funcIndex)
       elseif opcode == 0x1A then
         debug("Drop")
         pop()
