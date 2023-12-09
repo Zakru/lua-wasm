@@ -445,7 +445,7 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
             return table.unpack(returns)
           end
         end
-      elseif opcode == 0x0D then
+      elseif opcode == 0x0E then
         debug("Branch from table (" .. table.concat(instr[2], ", ") .. ") default " .. instr[3])
         local i = pop()
         local labelIndex
