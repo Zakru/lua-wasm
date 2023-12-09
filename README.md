@@ -14,12 +14,21 @@ runtime with backported features from 5.3.
 * Reading of WebAssembly's type, import, function, memory, export, code and data
   sections (and skipping others)
 * Initialization of active data segments
-* Execution of enough instructions to run a hello world program and an addition
-  program
+* Execution of enough instructions to run a hello world program, an addition
+  program and a more complex test program.
   * Supports proper function stacks, with locals, arguments and returns
   * The stack is implemented using recursive calls and block-specific stacks
   * Can print to the console using a user-provided imported function
   * Exported functions can be called from Lua like an ordinary function
+* A sandboxed environment. WASM code is interpreted in a virtual environment and
+  only affects the control flow of predetermined Lua code and can therefore not
+  perform malicious actions. The only way it can call outside functions is by
+  you providing imports (See the `hello.*` example files).
+
+There are many instructions that were not present in my test modules and as such
+have not been verified to work as expected. Please report any issues you find of
+any unexpected behavior. Again, the most any bugs will do is cause exceptions or
+unexpected results, so go wild.
 
 ## Seeing it in action
 

@@ -653,6 +653,19 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
       elseif opcode == 0xC0 then
         debug("Extend i32s8")
         push(bit32.arshift(bit32.lshift(pop(), 24), 24))
+      elseif opcode == 0xD0 then
+        debug("Push null reference")
+        push(REF_NULL)
+      elseif opcode == 0xD1 then
+        debug("Ref == null")
+        if pop() == REF_NULL then
+          push(1)
+        else
+          push(0)
+        end
+      elseif opcode == 0xD2 then
+        debug("Push function reference " .. instr[2])
+        push(instr[2])
       else
         error("Unimplemented instruction: " .. string.format("%02X", opcode))
       end
