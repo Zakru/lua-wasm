@@ -17,15 +17,30 @@ local VECTYPE_V128 = 0x7B
 
 local ELEM_KIND_FUNC = 0x00
 
+local debugIndent = 0
+local debugNewLine = true
+
 local function debugn(...)
   if LUAWASM_DEBUG_ON then
+    if debugNewLine then
+      for i=1,debugIndent do
+        io.write(". ")
+      end
+      debugNewLine = false
+    end
     io.write(...)
   end
 end
 
 local function debug(...)
   if LUAWASM_DEBUG_ON then
+    if debugNewLine then
+      for i=1,debugIndent do
+        io.write(". ")
+      end
+    end
     print(...)
+    debugNewLine = true
   end
 end
 
@@ -242,6 +257,7 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
 
   -- instrSeq: instruction sequence of continuation
   -- instrPos: position of continuation in sequence
+  -- endPos: block end position
   -- returns: arity of the label
   -- stack: stack of the label
   local labels = {}
@@ -296,7 +312,7 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
 
   local function doBlock(instrSeq, argc, returnc, labelPos)
     local args = popn(argc)
-    labels[#labels+1] = { instrSeq=seq, instrPos=labelPos or pos, stack=stack, returns=returnc }
+    labels[#labels+1] = { instrSeq=seq, instrPos=labelPos or pos, endPos=pos, stack=stack, returns=returnc }
     stack = {}
     pushn(args)
     seq = instrSeq
@@ -322,102 +338,273 @@ function instanceIndex:evaluate(instrSeq, returns, args, ...)
     pushn(returns)
   end
 
-  while pos <= #seq do
-    local instr = seq[pos]
-    pos = pos + 1
-    local opcode = instr[1]
+  local function ensureMemory(addr, size)
+    if addr + size > #self.memories[1] then
+      error(string.format("Memory address out of bounds (size %08X, address was %08X)", #self.memories[1], addr))
+    end
+  end
 
-    if opcode == 0x02 then
-      debugn("Block ")
-      local argc, returnc = blockTypeArity(instr[2])
-      debug(string.format("%d -> %d", argc, returnc))
-      doBlock(instr[3], argc, returnc)
-    elseif opcode == 0x0D then
-      debug("Branch " .. instr[2])
-      if gotoLabel(instr[2]) then
-        -- Function label, return
+  local function storeI32(addr, v, n)
+    for i=1,n or 4 do
+      self.memories[1][addr+i] = bit32.band(bit32.rshift(v, (i-1)*8), 0xff)
+    end
+  end
+
+  local function loadI32(addr, n)
+    local v = 0
+    for i=1,n or 4 do
+      v = bit32.bor(v, bit32.lshift(self.memories[1][addr+i], (i-1)*8))
+    end
+    return v
+  end
+
+  local function s32(v)
+    if bit32.band(v, 0x80000000) ~= 0 then
+      return v - 0x100000000
+    else
+      return v
+    end
+  end
+
+  while true do
+    while pos <= #seq do
+      local instr = seq[pos]
+      pos = pos + 1
+      local opcode = instr[1]
+
+      if opcode == 0x02 then
+        debugn("Block ")
+        local argc, returnc = blockTypeArity(instr[2])
+        debug(string.format("%d -> %d", argc, returnc))
+        doBlock(instr[3], argc, returnc)
+      elseif opcode == 0x03 then
+        debugn("Loop ")
+        local argc, returnc = blockTypeArity(instr[2])
+        debug(string.format("%d -> %d", argc, returnc))
+        doBlock(instr[3], argc, argc, pos - 1)
+      elseif opcode == 0x0C then
+        debug("Branch " .. instr[2])
+        if gotoLabel(instr[2]) then
+          -- Function label, return
+          local returns = popn(returns)
+          return table.unpack(returns)
+        end
+      elseif opcode == 0x0D then
+        debug("Conditional branch " .. instr[2])
+        if pop() ~= 0 then
+          debug("Did branch")
+          if gotoLabel(instr[2]) then
+            -- Function label, return
+            local returns = popn(returns)
+            return table.unpack(returns)
+          end
+        end
+      elseif opcode == 0x0F then
+        debug("Return")
         local returns = popn(returns)
         return table.unpack(returns)
-      end
-    elseif opcode == 0x0F then
-      debug("Return")
-      local returns = popn(returns)
-      return table.unpack(returns)
-    elseif opcode == 0x10 then
-      debug("Call function " .. instr[2])
-      local func = self.funcs[instr[2] + 1]
-      local args = popn(#func.funcType.args)
+      elseif opcode == 0x10 then
+        debug("Call function " .. instr[2])
+        local func = self.funcs[instr[2] + 1]
+        local args = popn(#func.funcType.args)
 
-      if func.funcKind == "host" then
-        pushn({func.code(table.unpack(args))})
-      elseif func.funcKind == "inst" then
-        pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
-      end
-    elseif opcode == 0x1A then
-      debug("Drop")
-      pop()
-    elseif opcode == 0x20 then
-      debug("Push from local " .. instr[2])
-      push(locals[instr[2]+1])
-    elseif opcode == 0x21 then
-      debug("Pop to local " .. instr[2])
-      locals[instr[2]+1] = pop()
-    elseif opcode == 0x22 then
-      debug("Copy to local " .. instr[2])
-      locals[instr[2]+1] = stack[#stack]
-    elseif opcode == 0x23 then
-      debug("Push from global " .. instr[2])
-      push(self.globals[instr[2]+1])
-    elseif opcode == 0x24 then
-      debug("Pop to global " .. instr[2])
-      self.globals[instr[2]+1] = pop()
-    elseif opcode == 0x37 then
-      debug(string.format("Store i64 (align %d offset %08X)", 2^instr[2], instr[3]))
-      local v = pop()
-      local i = pop()
-      local addr = instr[3] + i
-      if addr + 8 > #self.memories[1] then
-        error(string.format("Memory address out of bounds (size %08X, address was %08X)", #self.memories[i], addr))
-      end
-      for i=1,4 do
-        self.memories[addr+i] = bit32.band(bit32.rshift(v, (i-1)*8), 0xff)
-      end
-      local high = math.floor((v - bit32.band(v, 0xffffffff)) / 0x100000000)
-      for i=1,4 do
-        self.memories[addr+4+i] = bit32.band(bit32.rshift(high, (i-1)*8), 0xff)
-      end
-    elseif opcode == 0x41 then
-      debug("Push immediate i32 " .. instr[2])
-      push(instr[2])
-    elseif opcode == 0x42 then
-      debug("Push immediate i64 " .. instr[2])
-      push(instr[2])
-    elseif opcode == 0x4B then
-      debugn("Compare u32 ")
-      local b, a = pop(), pop()
-      local res
-      if a > b then
-        res = 1
+        if func.funcKind == "host" then
+          pushn({func.code(table.unpack(args))})
+        elseif func.funcKind == "inst" then
+          debugIndent = debugIndent + 1
+          pushn({self:evaluate(func.code.expr, #func.funcType.returns, #func.funcType.args, table.unpack(args))})
+          debugIndent = debugIndent - 1
+        end
+      elseif opcode == 0x1A then
+        debug("Drop")
+        pop()
+      elseif opcode == 0x1B then
+        debug("Select")
+        local c, b, a = pop(), pop(), pop()
+        if c ~= 0 then
+          push(a)
+        else
+          push(b)
+        end
+      elseif opcode == 0x20 then
+        debug("Push from local " .. instr[2] .. " " .. locals[instr[2]+1])
+        push(locals[instr[2]+1])
+      elseif opcode == 0x21 then
+        debugn("Pop to local " .. instr[2] .. " ")
+        local v = pop()
+        debug(v)
+        locals[instr[2]+1] = v
+      elseif opcode == 0x22 then
+        debug("Copy to local " .. instr[2] .. " " .. stack[#stack])
+        locals[instr[2]+1] = stack[#stack]
+      elseif opcode == 0x23 then
+        debug("Push from global " .. instr[2] .. " " .. self.globals[instr[2]+1])
+        push(self.globals[instr[2]+1])
+      elseif opcode == 0x24 then
+        debugn("Pop to global " .. instr[2] .. " ")
+        local v = pop()
+        debug(v)
+        self.globals[instr[2]+1] = v
+      elseif opcode == 0x28 then
+        debugn(string.format("Load i32 (align %d offset %08X) ", 2^instr[2], instr[3]))
+        local i = pop()
+        local addr = instr[3] + i
+        ensureMemory(addr, 4)
+        local v = loadI32(addr)
+        debug(v .. " @ " .. i)
+        push(v)
+      elseif opcode == 0x2C then
+        debugn(string.format("Load i32s8 (align %d offset %08X) ", 2^instr[2], instr[3]))
+        local i = pop()
+        local addr = instr[3] + i
+        ensureMemory(addr, 1)
+        local v = bit32.arshift(bit32.lshift(loadI32(addr, 1), 24), 24)
+        debug(v .. " @ " .. i)
+        push(v)
+      elseif opcode == 0x2D then
+        debugn(string.format("Load i32u8 (align %d offset %08X) ", 2^instr[2], instr[3]))
+        local i = pop()
+        local addr = instr[3] + i
+        ensureMemory(addr, 1)
+        local v = loadI32(addr, 1)
+        debug(v .. " @ " .. i)
+        push(v)
+      elseif opcode == 0x36 then
+        debugn(string.format("Store i32 (align %d offset %08X) ", 2^instr[2], instr[3]))
+        local v = pop()
+        local i = pop()
+        debug(v .. " @ " .. i)
+        local addr = instr[3] + i
+        ensureMemory(addr, 4)
+        storeI32(addr, v)
+      elseif opcode == 0x37 then
+        debugn(string.format("Store i64 (align %d offset %08X) ", 2^instr[2], instr[3]))
+        local v = pop()
+        local i = pop()
+        debug(v .. " @ " .. i)
+        local addr = instr[3] + i
+        ensureMemory(addr, 8)
+        storeI32(addr, v)
+        local high = math.floor((v - bit32.band(v, 0xffffffff)) / 0x100000000)
+        storeI32(addr+4, high)
+      elseif opcode == 0x3A then
+        debugn(string.format("Store 8 bits of i32 (align %d offset %08X) ", 2^instr[2], instr[3]))
+        local v = pop()
+        local i = pop()
+        debug(v .. " @ " .. i)
+        local addr = instr[3] + i
+        ensureMemory(addr, 1)
+        storeI32(addr, v, 1)
+      elseif opcode == 0x41 then
+        debug("Push immediate i32 " .. instr[2])
+        push(instr[2])
+      elseif opcode == 0x42 then
+        debug("Push immediate i64 " .. instr[2])
+        push(instr[2])
+      elseif opcode == 0x45 then
+        debug("i32 == 0")
+        if pop() == 0 then
+          push(1)
+        else
+          push(0)
+        end
+      elseif opcode == 0x46 then
+        debug("i32 == i32")
+        if pop() == pop() then
+          push(1)
+        else
+          push(0)
+        end
+      elseif opcode == 0x47 then
+        debug("i32 != i32")
+        if pop() ~= pop() then
+          push(1)
+        else
+          push(0)
+        end
+      elseif opcode == 0x48 then
+        debugn("LT s32 ")
+        local b, a = pop(), pop()
+        local res
+        if s32(a) < s32(b) then
+          res = 1
+        else
+          res = 0
+        end
+        debug(string.format("%d < %d = %d", a, b, res))
+        push(res)
+      elseif opcode == 0x49 then
+        debugn("LT u32 ")
+        local b, a = pop(), pop()
+        local res
+        if a < b then
+          res = 1
+        else
+          res = 0
+        end
+        debug(string.format("%d < %d = %d", a, b, res))
+        push(res)
+      elseif opcode == 0x4B then
+        debugn("GT u32 ")
+        local b, a = pop(), pop()
+        local res
+        if a > b then
+          res = 1
+        else
+          res = 0
+        end
+        debug(string.format("%d > %d = %d", a, b, res))
+        push(res)
+      elseif opcode == 0x4F then
+        debugn("GTE u32 ")
+        local b, a = pop(), pop()
+        local res
+        if a >= b then
+          res = 1
+        else
+          res = 0
+        end
+        debug(string.format("%d >= %d = %d", a, b, res))
+        push(res)
+      elseif opcode == 0x6A then
+        debugn("Add i32 ")
+        local b, a = pop(), pop()
+        local sum = bit32.band(a + b, 0xffffffff)
+        debug(string.format("%d + %d = %d", a, b, sum))
+        push(sum)
+      elseif opcode == 0x6B then
+        debugn("Subtract i32 ")
+        local b, a = pop(), pop()
+        local diff = bit32.band(a - b, 0xffffffff)
+        debug(string.format("%d - %d = %d", a, b, diff))
+        push(diff)
+      elseif opcode == 0x71 then
+        debugn("And i32 ")
+        local b, a = pop(), pop()
+        local anded = bit32.band(a, b)
+        debug(string.format("%d & %d = %d", a, b, anded))
+        push(anded)
+      elseif opcode == 0xC0 then
+        debug("Extend i32s8")
+        push(bit32.arshift(bit32.lshift(pop(), 24), 24))
       else
-        res = 0
+        error("Unimplemented instruction: " .. string.format("%02X", opcode))
       end
-      debug(string.format("%d > %d = %d", a, b, res))
-      push(res)
-    elseif opcode == 0x6A then
-      debugn("Add i32 ")
-      local b, a = pop(), pop()
-      local sum = bit32.band(a + b, 0xffffffff)
-      debug(string.format("%d + %d = %d", a, b, sum))
-      push(sum)
-    elseif opcode == 0x6B then
-      debugn("Subtract i32 ")
-      local b, a = pop(), pop()
-      local diff = bit32.band(a - b, 0xffffffff)
-      debug(string.format("%d - %d = %d", a, b, diff))
-      push(diff)
-    else
-      error("Unimplemented instruction: " .. string.format("%02X", opcode))
     end
+
+    if #labels == 0 then
+      break
+    end
+
+    debug("Block end")
+
+    local implicitReturns = stack
+    local label = labels[#labels]
+    labels[#labels] = nil
+    stack = label.stack
+    seq = label.endSeq
+    pos = label.endPos
+    pushn(implicitReturns)
   end
 
   debug("Implicit return")
